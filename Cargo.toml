@@ -1,0 +1,50 @@
+[package]
+name = "parts"
+version = "0.1.0"
+authors = ["Jérome Eertmans <jeertmans@icloud.com>"]
+edition = "2021"
+description = "Divide your projects into multiple (possibly overlapping) parts, allowing to monitor changes of user-defined sections within a larger project."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/jeertmans/parts"
+keywords = ["monitor", "status", "git", "versioning"]
+include = ["src/main.rs", "LICENSE.md", "README.md"]
+rust-version = "1.58.1"
+
+
+[dependencies]
+anyhow = "1.0.68"
+atty = "0.2.14"
+clap = { version = "4.0.32", features = ["color", "derive", "cargo", "env"] }
+clap-verbosity-flag = "2.0.0"
+clap_complete = { version = "4.0.7", optional = true }
+crossbeam-channel = "0.5.6"
+globset = "0.4.9"
+ignore = "0.4.18"
+lazy_static = "1.4.0"
+log = "0.4.17"
+pretty_env_logger = "0.4.0"
+regex = "1.7.0"
+serde = { version = "1.0.151", features = ["derive"] }
+termcolor = "1.1.3"
+thiserror = "1.0.38"
+toml = "0.5.10"
+
+
+[features]
+cli-complete = ["clap_complete"]
+git = []
+monitor = []
+
+
+default = ["cli-complete"]
+
+
+[metadata.parts]
+default = "src"
+
+
+[metadata.parts.src]
+globs = [
+    "src/**.rs"
+]
