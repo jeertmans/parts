@@ -1,0 +1,17 @@
+default = "src"
+
+
+[src]
+globs = [
+    "src/**.rs"
+]
+
+[markdown]
+regexes = [
+    "*.md"
+]
+
+[workflows]
+globs = [
+    ".github/workflows/*.yml"
+]

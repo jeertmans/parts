@@ -1,9 +1,10 @@
-use anyhow::Result;
+use crate::error::{Error, Result};
 use globset::Glob;
+use itertools::Itertools;
 use lazy_static::lazy_static;
 use log::warn;
 use regex::bytes::{RegexSet, RegexSetBuilder};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use termcolor::{ColorSpec, WriteColor};
 
 lazy_static! {
@@ -17,23 +18,6 @@ lazy_static! {
 
 const SPLIT_PATH: char = ':';
 const SPLIT_KEYS: char = '.';
-
-/// Enumeration of all possible error types.
-#[derive(Debug, thiserror::Error)]
-enum Error {
-    /// Error trying to get a value from TOML document.
-    #[error("File {path:?} does not contain key {key:?}")]
-    KeyNotFound { key: String, path: String },
-    /// Error parsing a TOML value in a table.
-    #[error("File {path:?} does not contain (nested) tables as expected")]
-    ValueIsNotTable { path: String },
-    /// Error parsing a TOML value in a table.
-    #[error("No config file was found, use verbose output for more details")]
-    NoConfigFileFound,
-    /// Specified config file value is invalid.
-    #[error("The user-defined config file value {value:?} is invalid, probably because the file dos not exist")]
-    InvalidConfigFileValue { value: String },
-}
 
 /// Split a string into a path and a list of keys.
 ///
@@ -65,11 +49,21 @@ pub fn validate_config_file_value(value: &str) -> Result<String> {
     if std::path::Path::new(path).exists() {
         Ok(value.to_string())
     } else {
-        Err(Error::InvalidConfigFileValue {
+        Err(Error::ConfigFileDoesNotExist {
             value: value.to_string(),
-        }
-        .into())
+        })
     }
+}
+
+
+fn deserialize_globs<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<Glob>, D::Error> {
+    use serde::de::Error;
+    use std::borrow::Cow;
+    let globs = <Vec<Cow<str>> as Deserialize>::deserialize(deserializer)?;
+    
+    globs.iter().map(|glob| Glob::new(glob).map_err(D::Error::custom)).collect()
 }
 
 /// Try to parse a config file into a [`ConfigFile`] struct.
@@ -90,20 +84,20 @@ pub fn try_parse_config_file(path: &str, keys: Vec<&str>) -> Result<ConfigFile> 
     for key in keys.into_iter() {
         match toml_document {
             toml::Value::Table(mut table) => {
-                toml_document = table.remove(key).ok_or(Error::KeyNotFound {
-                    key: key.to_string(),
+                toml_document = table.remove(key).ok_or(Error::KeysNotFound {
+                    keys: key.to_string(),
                     path: path.to_string(),
                 })?;
             }
             _ => {
                 return Err(Error::ValueIsNotTable {
                     path: path.to_string(),
-                }
-                .into())
+                })
             }
         }
     }
 
+    println!("{}", toml_document);
     let toml = toml_document.try_into()?;
     Ok(toml)
 }
@@ -119,10 +113,13 @@ pub fn try_find_config_file() -> Result<ConfigFile> {
                     ..config_file
                 })
             }
-            Err(e) => warn!("Some error occured with parsing: {}, see:\n\n{}]n", path, e),
+            Err(e) => match e {
+                Error::TomlDecode(_) => return Err(e),
+                _ => warn!("some error occured with parsing {:?}: {}\n", path, e),
+            },
         }
     }
-    return Err(Error::NoConfigFileFound.into());
+    return Err(Error::NoConfigFileFound);
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -157,7 +154,11 @@ impl ConfigFile {
             false
         }
     }
-
+    
+    /*
+    pub fn get_closest_match(&self, key: &str) -> Option<String> {
+        ngrammatic::CorpusBuilder::new().fill(self.configs.keys()).finish().search(key, 0.5).first()
+    }*/
 
     pub fn write_list<T: WriteColor>(&self, stdout: &mut T) -> Result<()> {
         let mut filename_color = ColorSpec::new();
@@ -167,38 +168,39 @@ impl ConfigFile {
         let (path, keys) = split_path_and_keys(&self.config_file);
 
         match self.configs.len() {
-            0 => stdout.write(b"Found not part in file: ")?,
-            1 => stdout.write(b"Found 1 part in file: ")?,
-            n => stdout.write(format!("Found {n} part in file: ").as_bytes())?,
+            0 => stdout.write_all(b"Found not part in file: ")?,
+            1 => stdout.write_all(b"Found 1 part in file: ")?,
+            n => stdout.write_all(format!("Found {n} part in file: ").as_bytes())?,
         };
 
         stdout.set_color(&filename_color)?;
-        stdout.write(path.as_bytes())?;
+        stdout.write_all(path.as_bytes())?;
         stdout.reset()?;
 
         for key in keys.iter() {
-            stdout.write(b" -> ")?;
+            stdout.write_all(b" -> ")?;
             stdout.set_color(&key_color)?;
-            stdout.write(key.as_bytes())?;
+            stdout.write_all(key.as_bytes())?;
             stdout.reset()?;
         }
 
-        stdout.write(b"\n")?;
+        stdout.write_all(b"\n")?;
 
         if self.configs.is_empty() {
             return Ok(());
         }
 
-        stdout.write(b"\n")?;
+        stdout.write_all(b"\n")?;
 
-        for config_name in self.configs.keys() {
+        for config_name in self.configs.keys().sorted() {
+            stdout.write_all(b"- ")?;
             if self.matches_default(&config_name) {
-            stdout.set_color(&key_color)?;
-                stdout.write(format!("{config_name} (default)\n").as_bytes())?;
+                stdout.set_color(&key_color)?;
+                stdout.write_all(format!("{config_name} (default)\n").as_bytes())?;
                 stdout.reset()?;
             } else {
-                stdout.write(config_name.as_bytes())?;
-                stdout.write(b"\n")?;
+                stdout.write_all(config_name.as_bytes())?;
+                stdout.write_all(b"\n")?;
             }
         }
 
@@ -215,35 +217,41 @@ pub struct Config {
     pub ignore_hidden: bool,
     #[serde(default = "default_true")]
     pub use_gitignore: bool,
+    #[serde(default = "default_regexset")]
+    #[serde(with = "serde_regex")]
+    pub regexes: RegexSet,
     #[serde(default)]
-    pub regexes: Vec<String>,
+    #[serde(deserialize_with = "deserialize_globs")]
+    pub globs: Vec<Glob>,
+    #[serde(default = "default_regexset")]
+    #[serde(with = "serde_regex")]
+    pub exclude_regexes: RegexSet,
     #[serde(default)]
-    pub globs: Vec<String>,
-    #[serde(default)]
-    pub exclude_regexes: Vec<String>,
-    #[serde(default)]
-    pub exclude_globs: Vec<String>,
+    #[serde(deserialize_with = "deserialize_globs")]
+    pub exclude_globs: Vec<Glob>,
 }
 
 fn default_directory() -> String {
-    ".".to_string()
+    "./".to_string()
 }
 
 const fn default_true() -> bool {
     true
 }
 
-pub fn try_parse_globs_and_regexes(globs: Vec<String>, regexes: Vec<String>) -> Result<RegexSet> {
-    let globs: std::result::Result<Vec<Glob>, globset::Error> = globs
-        .into_iter()
-        .map(|pattern| Glob::new(pattern.as_ref()))
-        .collect();
-    let globs: Vec<Glob> = globs?;
-    let glob_regexes: Vec<String> = globs
-        .into_iter()
-        .map(|glob| glob.regex().to_string())
-        .collect();
 
-    let regex_set = RegexSetBuilder::new(regexes.iter().chain(glob_regexes.iter())).build()?;
-    Ok(regex_set)
+fn default_regexset() -> RegexSet {
+    RegexSet::empty()
+}
+
+pub fn merge_globs_and_regexes(globs: Vec<Glob>, regexes: RegexSet) -> RegexSet {
+    RegexSetBuilder::new(
+        regexes
+            .patterns()
+            .iter()
+            .map(|pattern| pattern.as_str())
+            .chain(globs.iter().map(|glob| glob.regex())),
+    )
+    .build()
+    .expect("This cannot fail")
 }

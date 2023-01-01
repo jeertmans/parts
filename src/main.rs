@@ -4,11 +4,12 @@ use clap_complete::{generate, shells};
 use clap::CommandFactory;
 use clap::Parser;
 use clap_verbosity_flag::Verbosity;
-use termcolor::{ColorChoice, StandardStream};
+use termcolor::{BufferWriter, ColorChoice, StandardStream};
 
 mod config;
-//mod walk;
-use anyhow::Result;
+mod error;
+mod walk;
+use error::{Error, Result};
 
 #[derive(Parser)]
 #[command(about)]
@@ -133,7 +134,7 @@ struct WalkCommand {
     /// If true, will sort files by names.
     ///
     /// This may dramatically decrease the performances.
-    #[clap(short = 's', long, default_value = "false")]
+    #[clap(short, long, default_value = "false")]
     sorted: bool,
 }
 
@@ -146,14 +147,7 @@ enum Action {
     Walk(WalkCommand),
 }
 
-fn main() {
-    if let Err(e) = try_main() {
-        eprintln!("{}", e);
-        std::process::exit(2);
-    }
-}
-
-fn try_main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
 
     pretty_env_logger::formatted_builder()
@@ -173,6 +167,7 @@ fn try_main() -> Result<()> {
     } else {
         ColorChoice::Never
     };
+    let mut buffer_writer = BufferWriter::stdout(choice);
     let mut stdout = StandardStream::stdout(choice);
 
     match cli.action {
@@ -180,8 +175,11 @@ fn try_main() -> Result<()> {
             config_file.write_list(&mut stdout)?;
         }
         Action::Walk(walk) => {
-            let config = config_file.get(Some(&walk.part)).unwrap();
-            //let walker: walk::Walker = config.clone().try_into()?;
+            let config = config_file
+                .get(Some(&walk.part))
+                .ok_or(Error::UnknownPart { part: walk.part })?;
+            let walker: walk::Walker = config.clone().into();
+            walker.walk(&mut buffer_writer);
         }
         #[cfg(feature = "clap_complete")]
         Action::Complete(complete) => match complete.shell.as_str() {
